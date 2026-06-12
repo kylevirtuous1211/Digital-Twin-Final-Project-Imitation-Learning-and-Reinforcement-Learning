@@ -13,6 +13,9 @@ Imported by both the success termination (env config) and the scripted expert
 # Spec L1 requires position error < 5 cm.
 PLACE_POS_THRESHOLD = 0.05  # m
 
+# Yaw alignment tolerance for L2/L3 (spec: yaw error < 15 deg), in radians.
+PLACE_YAW_THRESHOLD = 0.2618  # 15 deg
+
 # Gripper must be open (fingers beyond this) to count the cube as released.
 FINGER_OPEN_THRESHOLD = 0.035  # m (each finger; max travel 0.04)
 

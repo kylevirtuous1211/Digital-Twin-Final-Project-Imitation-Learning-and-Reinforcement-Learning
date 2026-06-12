@@ -42,6 +42,8 @@ parser.add_argument("--dataset", type=str, default="./datasets/il_L1.hdf5", help
 parser.add_argument("--task", type=str, default="FinalProject-IL-L1-v0", help="Registered task name.")
 parser.add_argument("--valid_ratio", type=float, default=0.1, help="Fraction reserved for validation mask.")
 parser.add_argument("--max_steps", type=int, default=600, help="Per-episode buffer cap.")
+parser.add_argument("--control_yaw", action="store_true",
+                    help="Align cube yaw to the target platform yaw (L2/L3). Requires a 'goal_quat' obs term.")
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 
@@ -74,12 +76,15 @@ from final_project.tasks.manager_based.final_project.student_interface.IL.mdp im
 #   P5 PLACE     : lower onto the platform top
 #   P6 RELEASE   : open gripper and hold (success termination ends the episode)
 _N_PHASES = 7
-# Low transit height: reaching the far target platform requires a low, extended
-# arm configuration; transporting high over-extends the arm and blocks +y reach.
-H_SAFE = 0.13            # travel height above the table (base-frame z, m)
+# Transit height is computed per-env as max(grasp_z, place_z) + TRANSIT_CLEAR so the
+# cube clears both (possibly tall, L3) platforms while staying as low as possible —
+# a low, extended arm config is what lets the Franka reach the far target platform.
+APPROACH_CLEAR = 0.10    # hover this far above the cube before descending (m)
+TRANSIT_CLEAR = 0.08     # carry the cube this far above the taller platform top (m)
 GRASP_DZ = -0.005        # descend this far below cube center to engulf it (m)
 PLACE_CLEAR = 0.005      # release the cube this far above its resting height (m)
 MAX_STEP = 0.08          # safety clamp on the per-step position delta (m)
+MAX_YAW = 0.10           # safety clamp on the per-step yaw delta (rad)
 
 # Nominal phase durations in control steps — set the sinusoidal easing rate. A
 # phase ends when its ease completes AND (for motion phases) the EE has actually
@@ -109,15 +114,23 @@ def _mix_sin(t: torch.Tensor) -> torch.Tensor:
     return 0.5 * (1.0 - torch.cos(t * torch.pi))
 
 
+def _yaw_from_quat(quat: torch.Tensor) -> torch.Tensor:
+    """Yaw about world z from a (w, x, y, z) quaternion. Shape [N]."""
+    w, x, y, z = quat[:, 0], quat[:, 1], quat[:, 2], quat[:, 3]
+    return torch.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+
+
 class PickPlacePolicy:
     """Vectorized smooth pick-place expert producing 7-D relative-IK actions:
-    [dx, dy, dz, 0, 0, 0, gripper]. Position delta drives the EE toward a smoothly
-    interpolated waypoint; rotation delta is zero (orientation left free so far
-    targets stay reachable)."""
+    [dx, dy, dz, droll, dpitch, dyaw, gripper]. The position delta drives the EE
+    toward a smoothly interpolated waypoint; transit height adapts to the platform
+    heights. With control_yaw, the dyaw channel aligns the (grasped) cube to the
+    target platform yaw after the grasp; otherwise rotation is left free for reach."""
 
-    def __init__(self, num_envs: int, device: torch.device | str):
+    def __init__(self, num_envs: int, device: torch.device | str, control_yaw: bool = False):
         self.num_envs = num_envs
         self.device = device
+        self.control_yaw = control_yaw
         self.e = torch.zeros(num_envs, dtype=torch.long, device=device)       # phase index
         self.t = torch.zeros(num_envs, device=device)                          # phase progress [0,1)
         self.start_pos = torch.zeros(num_envs, 3, device=device)               # phase start anchor
@@ -149,15 +162,18 @@ class PickPlacePolicy:
         N = cube.shape[0]
         grasp_z = cube[:, 2] + GRASP_DZ
         place_z = goal[:, 2] + PLACE_Z_OFFSET + PLACE_CLEAR
-        safe = torch.full((N,), H_SAFE, device=self.device)
+        approach_z = cube[:, 2] + APPROACH_CLEAR
+        # Transit height adapts to platform heights (L3): clear the taller of the
+        # pick/place heights, but stay as low as possible for far reach.
+        transit_z = torch.maximum(self.pick_pos[:, 2] + GRASP_DZ, place_z) + TRANSIT_CLEAR
         cand = torch.stack(
             [
-                torch.stack([cube[:, 0], cube[:, 1], safe], dim=-1),                   # P0 above cube
+                torch.stack([cube[:, 0], cube[:, 1], approach_z], dim=-1),              # P0 above cube
                 torch.stack([cube[:, 0], cube[:, 1], grasp_z], dim=-1),                # P1 on cube
                 torch.stack([self.pick_pos[:, 0], self.pick_pos[:, 1],
                              self.pick_pos[:, 2] + GRASP_DZ], dim=-1),                  # P2 hold
-                torch.stack([self.pick_pos[:, 0], self.pick_pos[:, 1], safe], dim=-1),  # P3 lift
-                torch.stack([goal[:, 0], goal[:, 1], safe], dim=-1),                    # P4 over goal
+                torch.stack([self.pick_pos[:, 0], self.pick_pos[:, 1], transit_z], dim=-1),  # P3 lift
+                torch.stack([goal[:, 0], goal[:, 1], transit_z], dim=-1),               # P4 over goal
                 torch.stack([goal[:, 0], goal[:, 1], place_z], dim=-1),                 # P5 place
                 torch.stack([goal[:, 0], goal[:, 1], place_z], dim=-1),                 # P6 release/hold
             ],
@@ -195,6 +211,19 @@ class PickPlacePolicy:
         actions = torch.zeros(self.num_envs, 7, device=self.device)
         actions[:, 0:3] = dpos
         actions[:, 6] = self.grip[self.e]
+
+        # Yaw alignment (L2/L3): once the cube is grasped (phase >= LIFT), rotate the
+        # wrist about base z to drive the cube yaw toward the target platform yaw.
+        # The rotation delta is pre-multiplied (world frame), so dyaw>0 increases the
+        # cube's world yaw. Cube has 4-fold symmetry -> align modulo 90 deg.
+        if self.control_yaw:
+            tgt_yaw = _yaw_from_quat(obs["goal_quat"])
+            cube_yaw = _yaw_from_quat(obs["cube_quat"])
+            half = torch.pi / 4.0
+            yaw_err = torch.remainder(tgt_yaw - cube_yaw + half, torch.pi / 2.0) - half
+            dyaw = torch.clamp(yaw_err, -MAX_YAW, MAX_YAW)
+            active = self.e >= 3
+            actions[:, 5] = torch.where(active, dyaw, torch.zeros_like(dyaw))
 
         # Advance the phase clock (capped at 1.0 so the waypoint dwells at the end
         # target while the EE converges). A motion phase ends when the ease is done
@@ -297,7 +326,7 @@ def main() -> None:
     env_cfg.observations.policy.concatenate_terms = False
 
     env = gym.make(args_cli.task, cfg=env_cfg).unwrapped
-    policy = PickPlacePolicy(num_envs=env.num_envs, device=env.device)
+    policy = PickPlacePolicy(num_envs=env.num_envs, device=env.device, control_yaw=args_cli.control_yaw)
     try:
         run(env, policy, args_cli.dataset)
     finally:

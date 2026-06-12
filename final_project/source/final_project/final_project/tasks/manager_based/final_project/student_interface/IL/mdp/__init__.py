@@ -13,4 +13,4 @@ from isaaclab.envs.mdp.terminations import time_out  # noqa: F401
 
 from . import constants  # noqa: F401
 from .observations import ee_pos, ee_quat, object_pos_in_env_frame, object_quat_w  # noqa: F401
-from .terminations import place_success  # noqa: F401
+from .terminations import place_success, place_success_oriented  # noqa: F401

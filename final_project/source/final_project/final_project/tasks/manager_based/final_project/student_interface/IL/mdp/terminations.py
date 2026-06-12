@@ -21,6 +21,61 @@ from isaaclab.managers import SceneEntityCfg
 from . import constants
 
 
+def _yaw_from_quat(quat: torch.Tensor) -> torch.Tensor:
+    """Yaw (rotation about world z) from a (w, x, y, z) quaternion. Shape [N]."""
+    w, x, y, z = quat[:, 0], quat[:, 1], quat[:, 2], quat[:, 3]
+    return torch.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+
+
+def place_success_oriented(
+    env: ManagerBasedRLEnv,
+    cube_cfg: SceneEntityCfg = SceneEntityCfg("cube"),
+    target_cfg: SceneEntityCfg = SceneEntityCfg("target_platform"),
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot", joint_names=["panda_finger.*"]),
+    pos_threshold: float = constants.PLACE_POS_THRESHOLD,
+    yaw_threshold: float = constants.PLACE_YAW_THRESHOLD,
+    finger_open_threshold: float = constants.FINGER_OPEN_THRESHOLD,
+    min_hold_steps: int = constants.HOLD_STEPS,
+) -> torch.Tensor:
+    """L2/L3 success: cube on the target platform within ``pos_threshold`` (3-D, so it
+    also covers the randomized place height) AND aligned to the platform yaw within
+    ``yaw_threshold``, with the gripper open, held ``min_hold_steps`` steps.
+
+    Yaw error is taken modulo 90 deg because a cube is 4-fold symmetric.
+    """
+    cube: RigidObject = env.scene[cube_cfg.name]
+    target: RigidObject = env.scene[target_cfg.name]
+    robot: Articulation = env.scene[robot_cfg.name]
+
+    placement_point = target.data.root_pos_w.clone()
+    placement_point[:, 2] += constants.PLATFORM_HALF + constants.CUBE_HALF
+    pos_ok = torch.norm(cube.data.root_pos_w - placement_point, dim=-1) < pos_threshold
+
+    # Yaw error modulo 90 deg, mapped to [0, 45] deg.
+    d = _yaw_from_quat(cube.data.root_quat_w) - _yaw_from_quat(target.data.root_quat_w)
+    half = torch.pi / 4.0
+    yaw_err = torch.abs(torch.remainder(d + half, torch.pi / 2.0) - half)
+    yaw_ok = yaw_err < yaw_threshold
+
+    finger_ids = robot_cfg.joint_ids
+    if finger_ids is None or isinstance(finger_ids, slice):
+        finger_ids = [i for i, n in enumerate(robot.data.joint_names) if "finger" in n]
+    gripper_open = robot.data.joint_pos[:, finger_ids].mean(dim=-1) > finger_open_threshold
+
+    instant_ok = pos_ok & yaw_ok & gripper_open
+
+    if not hasattr(env, "_place_success_counter") or env._place_success_counter.shape[0] != env.num_envs:
+        env._place_success_counter = torch.zeros(env.num_envs, dtype=torch.long, device=env.device)
+    just_reset = env.episode_length_buf == 0
+    env._place_success_counter = torch.where(
+        just_reset, torch.zeros_like(env._place_success_counter), env._place_success_counter
+    )
+    env._place_success_counter = torch.where(
+        instant_ok, env._place_success_counter + 1, torch.zeros_like(env._place_success_counter)
+    )
+    return env._place_success_counter >= min_hold_steps
+
+
 def place_success(
     env: ManagerBasedRLEnv,
     cube_cfg: SceneEntityCfg = SceneEntityCfg("cube"),
