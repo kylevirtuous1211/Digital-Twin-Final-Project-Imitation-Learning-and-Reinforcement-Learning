@@ -1,0 +1,52 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+build/
+dist/
+.eggs/
+*.so
+
+# ---- Virtual envs ----
+.venv/
+venv/
+env/
+
+# ---- IL/RL datasets (large, regenerable via scripts/collect_il_demos.py) ----
+datasets/*.hdf5
+datasets/*.hdf5.lock
+datasets/*.txt
+
+# ---- Training logs & checkpoints (large, regenerable) ----
+logs/
+outputs/
+runs/
+wandb/
+*.pth
+*.pt
+*.ckpt
+bc_trained_models/
+
+# ---- Isaac Sim / Kit logs & caches ----
+*.log
+kit/logs/
+.nucleus/
+.cache/
+
+# ---- Videos / large media (record fresh for the demo deliverable) ----
+*.mp4
+*.mkv
+*.avi
+
+# ---- Editor / OS ----
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+
+# ---- Ad-hoc / scratch ----
+scripts/_*.py
+_scratch/
+tmp/
