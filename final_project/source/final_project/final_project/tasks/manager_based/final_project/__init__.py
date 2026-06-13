@@ -33,7 +33,7 @@ gym.register(
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": f"{__name__}.student_interface.IL.env_cfg_L3:EnvCfg",
-        "robomimic_bc_cfg_entry_point": f"{agents.__name__}:robomimic/bc.json",
+        "robomimic_bc_cfg_entry_point": f"{agents.__name__}:robomimic/bc_L3.json",
     },
 )
 
