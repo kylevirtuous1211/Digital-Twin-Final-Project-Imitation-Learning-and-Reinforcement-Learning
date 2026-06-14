@@ -31,8 +31,21 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 
 from isaaclab.app import AppLauncher
+
+# Source tree of the final_project package alongside this script. The shared
+# IsaacLab venv's editable install may map `final_project` to a different
+# checkout (e.g. dt_final_project) via a sys.meta_path finder that wins over
+# sys.path -> demos would be collected with the WRONG obs/env cfg. Force local.
+LOCAL_PKG_SRC = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "source", "final_project"))
+
+
+def _force_local_final_project() -> None:
+    sys.meta_path = [f for f in sys.meta_path if "final_project" not in type(f).__module__]
+    if LOCAL_PKG_SRC not in sys.path:
+        sys.path.insert(0, LOCAL_PKG_SRC)
 
 # ----- CLI must be parsed BEFORE Isaac Sim imports -----
 parser = argparse.ArgumentParser(description="Collect Franka pick-place demos for IL L1.")
@@ -44,6 +57,12 @@ parser.add_argument("--valid_ratio", type=float, default=0.1, help="Fraction res
 parser.add_argument("--max_steps", type=int, default=600, help="Per-episode buffer cap.")
 parser.add_argument("--control_yaw", action="store_true",
                     help="Align cube yaw to the target platform yaw (L2/L3). Requires a 'goal_quat' obs term.")
+# Quality filter: keep only SMOOTH successful trajectories. Thresholds calibrated
+# from existing L3 data (EE-jerk p99~0.023/max~0.035; cube-jump p99~0.046).
+parser.add_argument("--max_ee_jerk", type=float, default=0.03,
+                    help="Reject demo if max EE 2nd-difference (jerk) exceeds this (m). 0 disables.")
+parser.add_argument("--max_cube_jump", type=float, default=0.05,
+                    help="Reject demo if max per-step cube displacement exceeds this (m); flags knocked/dropped cube. 0 disables.")
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 
@@ -58,7 +77,10 @@ import torch  # noqa: E402
 
 from isaaclab_tasks.utils import parse_env_cfg  # noqa: E402
 
+_force_local_final_project()
 import final_project  # noqa: F401,E402  registers FinalProject-* gym envs
+
+print(f">>> final_project imported from: {final_project.__file__}", flush=True)
 from final_project.tasks.manager_based.final_project.student_interface.IL.mdp import constants  # noqa: E402
 
 
@@ -249,6 +271,35 @@ class PickPlacePolicy:
         return actions
 
 
+def _trajectory_smoothness(steps: list[dict]) -> dict:
+    """Smoothness metrics for an executed episode buffer.
+
+    ``ee_jerk``  = max magnitude of the EE position 2nd-difference (acceleration);
+                   spikes indicate jerky / unstable IK tracking.
+    ``cube_jump``= max per-step cube displacement; a large value means the cube was
+                   knocked or dropped (it should sit still pre-grasp and move
+                   smoothly with the gripper after).
+    """
+    eef = np.stack([s["obs"]["eef_pos"] for s in steps], axis=0)
+    cube = np.stack([s["obs"]["cube_pos"] for s in steps], axis=0)
+    ee_jerk = 0.0
+    if len(eef) >= 3:
+        sd = eef[2:] - 2.0 * eef[1:-1] + eef[:-2]
+        ee_jerk = float(np.linalg.norm(sd, axis=1).max())
+    cube_jump = float(np.linalg.norm(np.diff(cube, axis=0), axis=1).max()) if len(cube) >= 2 else 0.0
+    return {"ee_jerk": ee_jerk, "cube_jump": cube_jump}
+
+
+def _is_smooth(steps: list[dict]) -> tuple[bool, str, dict]:
+    """Return (accept, reason, metrics). A threshold of 0 disables that check."""
+    m = _trajectory_smoothness(steps)
+    if args_cli.max_ee_jerk > 0 and m["ee_jerk"] > args_cli.max_ee_jerk:
+        return False, f"EE jerk {m['ee_jerk']:.4f} > {args_cli.max_ee_jerk}", m
+    if args_cli.max_cube_jump > 0 and m["cube_jump"] > args_cli.max_cube_jump:
+        return False, f"cube jump {m['cube_jump']:.4f} > {args_cli.max_cube_jump}", m
+    return True, "", m
+
+
 def _flush_episode(data_grp: h5py.Group, saved_idx: int, steps: list[dict]) -> None:
     ep = data_grp.create_group(f"demo_{saved_idx}")
     actions = np.stack([s["action"] for s in steps], axis=0)
@@ -270,6 +321,8 @@ def run(env, policy: PickPlacePolicy, dataset_path: str) -> None:
     buffers: list[list[dict]] = [[] for _ in range(env.num_envs)]
     saved = 0
     attempted = 0
+    rejected_fail = 0       # episode ended by truncation (task not successful)
+    rejected_rough = 0      # successful but failed the smoothness filter
 
     with h5py.File(dataset_path, "w") as f:
         data = f.create_group("data")
@@ -302,10 +355,19 @@ def run(env, policy: PickPlacePolicy, dataset_path: str) -> None:
             for i in done_ids:
                 attempted += 1
                 success = bool(terminated[i].item())  # success term; truncation discarded
-                if success and saved < args_cli.num_demos and len(buffers[i]) > 1:
-                    _flush_episode(data, saved, buffers[i])
-                    saved += 1
-                    print(f"[saved {saved}/{args_cli.num_demos}] env={i} len={len(buffers[i])} attempts={attempted}")
+                if not success:
+                    rejected_fail += 1
+                elif saved < args_cli.num_demos and len(buffers[i]) > 1:
+                    accept, reason, m = _is_smooth(buffers[i])
+                    if accept:
+                        _flush_episode(data, saved, buffers[i])
+                        saved += 1
+                        print(f"[saved {saved}/{args_cli.num_demos}] env={i} len={len(buffers[i])} "
+                              f"jerk={m['ee_jerk']:.4f} cube_jump={m['cube_jump']:.4f} attempts={attempted}", flush=True)
+                    else:
+                        rejected_rough += 1
+                        print(f"[reject-rough] env={i} {reason} "
+                              f"(jerk={m['ee_jerk']:.4f} cube_jump={m['cube_jump']:.4f}) rough_rejects={rejected_rough}", flush=True)
                 buffers[i] = []
                 policy.reset_idx([i])
 
@@ -317,7 +379,9 @@ def run(env, policy: PickPlacePolicy, dataset_path: str) -> None:
         mask.create_dataset("train", data=np.array(all_demos[:-n_valid], dtype=object))
         mask.create_dataset("valid", data=np.array(all_demos[-n_valid:], dtype=object))
 
-    print(f"\nDone. {saved} demos -> {dataset_path} (train={saved - n_valid}, valid={n_valid}, attempts={attempted})")
+    print(f"\nDone. {saved} demos -> {dataset_path} (train={saved - n_valid}, valid={n_valid})")
+    print(f"Quality filter: attempts={attempted}  saved={saved}  "
+          f"rejected_fail(not success)={rejected_fail}  rejected_rough(smoothness)={rejected_rough}")
 
 
 def main() -> None:
