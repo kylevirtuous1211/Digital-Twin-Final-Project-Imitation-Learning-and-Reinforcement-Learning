@@ -54,7 +54,8 @@ parser.add_argument("--num_demos", type=int, default=200, help="Successful demos
 parser.add_argument("--dataset", type=str, default="./datasets/il_L1.hdf5", help="HDF5 output path.")
 parser.add_argument("--task", type=str, default="FinalProject-IL-L1-v0", help="Registered task name.")
 parser.add_argument("--valid_ratio", type=float, default=0.1, help="Fraction reserved for validation mask.")
-parser.add_argument("--max_steps", type=int, default=600, help="Per-episode buffer cap.")
+parser.add_argument("--max_steps", type=int, default=900,
+                    help="Per-episode buffer cap. Episodes that hit it are discarded (truncated, mislabel risk).")
 parser.add_argument("--control_yaw", action="store_true",
                     help="Align cube yaw to the target platform yaw (L2/L3). Requires a 'goal_quat' obs term.")
 # Quality filter: keep only SMOOTH successful trajectories. Thresholds calibrated
@@ -63,6 +64,8 @@ parser.add_argument("--max_ee_jerk", type=float, default=0.03,
                     help="Reject demo if max EE 2nd-difference (jerk) exceeds this (m). 0 disables.")
 parser.add_argument("--max_cube_jump", type=float, default=0.05,
                     help="Reject demo if max per-step cube displacement exceeds this (m); flags knocked/dropped cube. 0 disables.")
+parser.add_argument("--diag", type=str, default="",
+                    help="Optional JSONL path to log per-episode outcome+config (diagnostics). Empty disables.")
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 
@@ -82,6 +85,7 @@ import final_project  # noqa: F401,E402  registers FinalProject-* gym envs
 
 print(f">>> final_project imported from: {final_project.__file__}", flush=True)
 from final_project.tasks.manager_based.final_project.student_interface.IL.mdp import constants  # noqa: E402
+from final_project.tasks.manager_based.final_project.student_interface.IL import collect_utils as cu  # noqa: E402
 
 
 # ----- Smooth pick-place state machine (NVIDIA PickPlaceController style) -----
@@ -106,7 +110,8 @@ TRANSIT_CLEAR = 0.08     # carry the cube this far above the taller platform top
 GRASP_DZ = -0.005        # descend this far below cube center to engulf it (m)
 PLACE_CLEAR = 0.005      # release the cube this far above its resting height (m)
 MAX_STEP = 0.08          # safety clamp on the per-step position delta (m)
-MAX_YAW = 0.10           # safety clamp on the per-step yaw delta (rad)
+MAX_YAW = 0.20           # per-step yaw delta (rad); higher so large target yaws converge
+YAW_DONE_TOL = 0.175     # place/release only completes once |yaw_err| < ~10 deg (margin under 15 deg success)
 
 # Nominal phase durations in control steps — set the sinusoidal easing rate. A
 # phase ends when its ease completes AND (for motion phases) the EE has actually
@@ -117,8 +122,9 @@ _PHASE_STEPS = [40, 55, 20, 35, 60, 55, 100000]
 # time-based only -> tolerance unused (see _DWELL).
 _PHASE_TOL = [0.04, 0.02, 0.0, 0.04, 0.04, 0.02, 0.0]
 
-# Hard step cap per phase (safety against stalls on unreachable targets).
-_PHASE_CAP = [160, 240, 80, 160, 280, 280, 10**9]
+# Generous safety backstops only. Phases now advance on ACTUAL arrival (and, for
+# PLACE, on yaw convergence); caps just prevent infinite stalls on unreachable goals.
+_PHASE_CAP = [320, 480, 80, 320, 560, 700, 10**9]
 
 # GRASP (close) and RELEASE (hold) are dwell phases: advance on time alone.
 _DWELL = {2, 6}
@@ -246,6 +252,9 @@ class PickPlacePolicy:
             dyaw = torch.clamp(yaw_err, -MAX_YAW, MAX_YAW)
             active = self.e >= 3
             actions[:, 5] = torch.where(active, dyaw, torch.zeros_like(dyaw))
+            yaw_ok = yaw_err.abs() < YAW_DONE_TOL
+        else:
+            yaw_ok = torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
 
         # Advance the phase clock (capped at 1.0 so the waypoint dwells at the end
         # target while the EE converges). A motion phase ends when the ease is done
@@ -259,7 +268,13 @@ class PickPlacePolicy:
         time_done = self.t >= 1.0
         dwell = self.is_dwell[self.e]
         cap_hit = self.steps.float() > self.cap[self.e]
-        advance = (self.e < _N_PHASES - 1) & (cap_hit | (time_done & (dwell | reached)))
+        # Convergence-gated: motion phases advance only once actually arrived. The
+        # PLACE phase (e==5) additionally waits for yaw alignment (settle) so the
+        # gripper does not open until the cube yaw is within tolerance. cap_hit is a
+        # generous backstop against true stalls / unreachable goals.
+        arrived = time_done & (dwell | reached)
+        place_gate = torch.where(self.e == 5, yaw_ok, torch.ones_like(yaw_ok))
+        advance = (self.e < _N_PHASES - 1) & (cap_hit | (arrived & place_gate))
         if advance.any():
             to_grasp = advance & (self.e == 1)
             if to_grasp.any():
@@ -269,35 +284,6 @@ class PickPlacePolicy:
             self.t[advance] = 0.0
             self.steps[advance] = 0
         return actions
-
-
-def _trajectory_smoothness(steps: list[dict]) -> dict:
-    """Smoothness metrics for an executed episode buffer.
-
-    ``ee_jerk``  = max magnitude of the EE position 2nd-difference (acceleration);
-                   spikes indicate jerky / unstable IK tracking.
-    ``cube_jump``= max per-step cube displacement; a large value means the cube was
-                   knocked or dropped (it should sit still pre-grasp and move
-                   smoothly with the gripper after).
-    """
-    eef = np.stack([s["obs"]["eef_pos"] for s in steps], axis=0)
-    cube = np.stack([s["obs"]["cube_pos"] for s in steps], axis=0)
-    ee_jerk = 0.0
-    if len(eef) >= 3:
-        sd = eef[2:] - 2.0 * eef[1:-1] + eef[:-2]
-        ee_jerk = float(np.linalg.norm(sd, axis=1).max())
-    cube_jump = float(np.linalg.norm(np.diff(cube, axis=0), axis=1).max()) if len(cube) >= 2 else 0.0
-    return {"ee_jerk": ee_jerk, "cube_jump": cube_jump}
-
-
-def _is_smooth(steps: list[dict]) -> tuple[bool, str, dict]:
-    """Return (accept, reason, metrics). A threshold of 0 disables that check."""
-    m = _trajectory_smoothness(steps)
-    if args_cli.max_ee_jerk > 0 and m["ee_jerk"] > args_cli.max_ee_jerk:
-        return False, f"EE jerk {m['ee_jerk']:.4f} > {args_cli.max_ee_jerk}", m
-    if args_cli.max_cube_jump > 0 and m["cube_jump"] > args_cli.max_cube_jump:
-        return False, f"cube jump {m['cube_jump']:.4f} > {args_cli.max_cube_jump}", m
-    return True, "", m
 
 
 def _flush_episode(data_grp: h5py.Group, saved_idx: int, steps: list[dict]) -> None:
@@ -317,12 +303,14 @@ def _flush_episode(data_grp: h5py.Group, saved_idx: int, steps: list[dict]) -> N
 
 def run(env, policy: PickPlacePolicy, dataset_path: str) -> None:
     os.makedirs(os.path.dirname(os.path.abspath(dataset_path)), exist_ok=True)
+    diag_f = open(args_cli.diag, "w") if args_cli.diag else None
 
     buffers: list[list[dict]] = [[] for _ in range(env.num_envs)]
     saved = 0
     attempted = 0
     rejected_fail = 0       # episode ended by truncation (task not successful)
     rejected_rough = 0      # successful but failed the smoothness filter
+    rejected_capped = 0     # success but buffer hit max_steps -> truncated, discard
 
     with h5py.File(dataset_path, "w") as f:
         data = f.create_group("data")
@@ -355,10 +343,26 @@ def run(env, policy: PickPlacePolicy, dataset_path: str) -> None:
             for i in done_ids:
                 attempted += 1
                 success = bool(terminated[i].item())  # success term; truncation discarded
+                if diag_f is not None and len(buffers[i]) >= 1:
+                    first = buffers[i][0]["obs"]
+                    last = buffers[i][-1]["obs"]
+                    cube_l = last["cube_pos"]; goal_l = last["goal_pos"]
+                    pos_err = float(np.linalg.norm(cube_l[:2] - goal_l[:2]))
+                    yaw_err_deg = 0.0
+                    if "goal_quat" in last and "cube_quat" in last:
+                        gq, cq = last["goal_quat"], last["cube_quat"]
+                        ty = float(np.arctan2(2*(gq[0]*gq[3]+gq[1]*gq[2]), 1-2*(gq[2]**2+gq[3]**2)))
+                        cyaw = float(np.arctan2(2*(cq[0]*cq[3]+cq[1]*cq[2]), 1-2*(cq[2]**2+cq[3]**2)))
+                        yaw_err_deg = abs(np.degrees(cu.yaw_error_rad(ty, cyaw)))
+                    rec = cu.failure_record(success, first, last, pos_err, yaw_err_deg, int(policy.e[i].item()))
+                    diag_f.write(json.dumps(rec) + "\n"); diag_f.flush()
                 if not success:
                     rejected_fail += 1
+                elif cu.hit_step_cap(len(buffers[i]), args_cli.max_steps):
+                    rejected_capped += 1
+                    print(f"[reject-capped] env={i} hit max_steps={args_cli.max_steps} capped_rejects={rejected_capped}", flush=True)
                 elif saved < args_cli.num_demos and len(buffers[i]) > 1:
-                    accept, reason, m = _is_smooth(buffers[i])
+                    accept, reason, m = cu.is_smooth(buffers[i], args_cli.max_ee_jerk, args_cli.max_cube_jump)
                     if accept:
                         _flush_episode(data, saved, buffers[i])
                         saved += 1
@@ -379,9 +383,13 @@ def run(env, policy: PickPlacePolicy, dataset_path: str) -> None:
         mask.create_dataset("train", data=np.array(all_demos[:-n_valid], dtype=object))
         mask.create_dataset("valid", data=np.array(all_demos[-n_valid:], dtype=object))
 
+        if diag_f is not None:
+            diag_f.close()
+
     print(f"\nDone. {saved} demos -> {dataset_path} (train={saved - n_valid}, valid={n_valid})")
     print(f"Quality filter: attempts={attempted}  saved={saved}  "
-          f"rejected_fail(not success)={rejected_fail}  rejected_rough(smoothness)={rejected_rough}")
+          f"rejected_fail(not success)={rejected_fail}  rejected_rough(smoothness)={rejected_rough}  "
+          f"rejected_capped(truncated)={rejected_capped}")
 
 
 def main() -> None:
