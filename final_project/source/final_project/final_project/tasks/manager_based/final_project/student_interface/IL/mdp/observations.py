@@ -64,3 +64,13 @@ def object_quat_w(
     """Object orientation quaternion (w, x, y, z) in world frame. Shape [N, 4]."""
     asset: RigidObject = env.scene[asset_cfg.name]
     return asset.data.root_quat_w
+
+
+def gripper_pos(env: ManagerBasedRLEnv, robot_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> torch.Tensor:
+    """Both Franka finger joint positions (gripper width state), shape [N, 2].
+
+    Lets a BC policy observe open/closed directly instead of inferring it from poses.
+    """
+    robot: Articulation = env.scene[robot_cfg.name]
+    ids, _ = robot.find_joints(["panda_finger_.*"])
+    return robot.data.joint_pos[:, ids]

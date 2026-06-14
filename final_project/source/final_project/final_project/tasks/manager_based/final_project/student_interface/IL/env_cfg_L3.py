@@ -34,6 +34,7 @@ class ObservationsCfg:
         cube_quat = ObsTerm(func=mdp.object_quat_w, params={"asset_cfg": SceneEntityCfg("cube")})
         goal_pos = ObsTerm(func=mdp.object_pos_in_env_frame, params={"asset_cfg": SceneEntityCfg("target_platform")})
         goal_quat = ObsTerm(func=mdp.object_quat_w, params={"asset_cfg": SceneEntityCfg("target_platform")})
+        gripper = ObsTerm(func=mdp.gripper_pos, params={"robot_cfg": SceneEntityCfg("robot")})
 
         def __post_init__(self) -> None:
             self.enable_corruption = False
