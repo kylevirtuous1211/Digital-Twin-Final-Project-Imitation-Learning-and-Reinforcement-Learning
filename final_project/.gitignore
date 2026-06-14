@@ -64,10 +64,11 @@ _build
 # Teleop Recorded Dataset
 /datasets/
 
-# Tests (ignore stray test artifacts, but track our unit tests)
+# Tests (ignore stray artifacts/pycache, but track our unit test sources)
 tests/
 !tests/
-!tests/**
+!tests/**/
+!tests/**/*.py
 
 # Docker history
 .isaac-lab-docker-history
