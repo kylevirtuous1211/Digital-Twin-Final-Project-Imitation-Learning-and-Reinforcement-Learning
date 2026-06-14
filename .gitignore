@@ -12,6 +12,11 @@ dist/
 .venv/
 venv/
 env/
+# Exception: track the package's env/ SOURCE (IL/RL level configs & events).
+# The generic env/ rule above (for virtualenvs) would otherwise hide it.
+!final_project/source/final_project/final_project/tasks/manager_based/final_project/env/
+!final_project/source/final_project/final_project/tasks/manager_based/final_project/env/**/
+!final_project/source/final_project/final_project/tasks/manager_based/final_project/env/**/*.py
 
 # ---- IL/RL datasets (large, regenerable via scripts/collect_il_demos.py) ----
 datasets/*.hdf5
