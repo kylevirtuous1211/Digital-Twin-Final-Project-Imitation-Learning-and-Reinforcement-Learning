@@ -14,6 +14,7 @@ gym.register(
     kwargs={
         "env_cfg_entry_point": f"{__name__}.student_interface.IL.env_cfg_L1:EnvCfg",
         "robomimic_bc_cfg_entry_point": f"{agents.__name__}:robomimic/bc.json",
+        "robomimic_bc_rnn_cfg_entry_point": f"{agents.__name__}:robomimic/bc_rnn.json",
     },
 )
 
