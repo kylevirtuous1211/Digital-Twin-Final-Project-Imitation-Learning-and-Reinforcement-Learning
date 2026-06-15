@@ -66,6 +66,9 @@ parser.add_argument("--max_cube_jump", type=float, default=0.05,
                     help="Reject demo if max per-step cube displacement exceeds this (m); flags knocked/dropped cube. 0 disables.")
 parser.add_argument("--diag", type=str, default="",
                     help="Optional JSONL path to log per-episode outcome+config (diagnostics). Empty disables.")
+parser.add_argument("--transit_clear", type=float, default=0.08,
+                    help="Carry the cube this far above the taller platform top (m). Lower = arm stays "
+                         "extended-low for farther reach to distant targets (TRANSLATE reachability).")
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 
@@ -106,7 +109,7 @@ _N_PHASES = 7
 # cube clears both (possibly tall, L3) platforms while staying as low as possible —
 # a low, extended arm config is what lets the Franka reach the far target platform.
 APPROACH_CLEAR = 0.10    # hover this far above the cube before descending (m)
-TRANSIT_CLEAR = 0.08     # carry the cube this far above the taller platform top (m)
+TRANSIT_CLEAR = args_cli.transit_clear  # carry the cube this far above the taller platform top (m)
 GRASP_DZ = -0.005        # descend this far below cube center to engulf it (m)
 PLACE_CLEAR = 0.005      # release the cube this far above its resting height (m)
 MAX_STEP = 0.08          # safety clamp on the per-step position delta (m)

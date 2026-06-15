@@ -30,12 +30,39 @@ from isaaclab.app import AppLauncher
 ISAACLAB_PATH = os.environ.get("ISAACLAB_PATH", "/home/kyle/Desktop/IsaacLab")
 LAB_TRAIN_PY = os.path.join(ISAACLAB_PATH, "scripts/imitation_learning/robomimic/train.py")
 
+# Source tree of the final_project package that lives alongside THIS script
+# (../source/final_project). We import from here regardless of where the venv's
+# editable install happens to point.
+LOCAL_PKG_SRC = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "source", "final_project")
+)
+
+
+def _force_local_final_project() -> None:
+    """Ensure ``import final_project`` resolves to THIS repo's source tree.
+
+    The shared IsaacLab venv has an editable install whose finder may map the
+    ``final_project`` name to a *different* checkout (e.g. ``dt_final_project``).
+    That finder sits on ``sys.meta_path`` and wins over ``sys.path``, so it would
+    silently load a stale package — wrong obs keys in ``bc.json``, wrong env cfg.
+    We drop that finder and prepend our own source dir so the package, its
+    ``agents/robomimic/bc.json``, and env configs all come from this repo.
+    """
+    sys.meta_path = [
+        f for f in sys.meta_path if "final_project" not in type(f).__module__
+    ]
+    if LOCAL_PKG_SRC not in sys.path:
+        sys.path.insert(0, LOCAL_PKG_SRC)
+
 
 def main() -> None:
     app_launcher = AppLauncher(headless=True)
     app = app_launcher.app
 
+    _force_local_final_project()
     import final_project  # noqa: F401  registers FinalProject-* tasks
+
+    print(f">>> final_project imported from: {final_project.__file__}", flush=True)
 
     import isaaclab.app as app_mod
 
