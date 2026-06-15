@@ -69,6 +69,9 @@ parser.add_argument("--diag", type=str, default="",
 parser.add_argument("--transit_clear", type=float, default=0.08,
                     help="Carry the cube this far above the taller platform top (m). Lower = arm stays "
                          "extended-low for farther reach to distant targets (TRANSLATE reachability).")
+parser.add_argument("--noise", type=float, default=0.0,
+                    help="DART: add Gaussian noise (m, std) to the STEPPED dpos so the expert visits a "
+                         "TUBE of states; the recorded label is the CLEAN expert action. Teaches feedback.")
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 
@@ -326,8 +329,13 @@ def run(env, policy: PickPlacePolicy, dataset_path: str) -> None:
         phase_names = ["APP", "DSC", "GRP", "LFT", "TRN", "PLC", "REL"]
         while saved < args_cli.num_demos:
             with torch.inference_mode():
-                actions = policy.compute(obs_dict["policy"])
-                next_obs_dict, _, terminated, truncated, _ = env.step(actions)
+                actions = policy.compute(obs_dict["policy"])           # CLEAN expert action = the label
+                if args_cli.noise > 0:
+                    step_act = actions.clone()
+                    step_act[:, 0:3] += torch.randn(step_act.shape[0], 3, device=step_act.device) * args_cli.noise
+                else:
+                    step_act = actions
+                next_obs_dict, _, terminated, truncated, _ = env.step(step_act)  # step the NOISY action
 
             step_counter += 1
             if step_counter % 120 == 0:

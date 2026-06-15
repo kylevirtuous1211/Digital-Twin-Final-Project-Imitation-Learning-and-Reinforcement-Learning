@@ -33,6 +33,12 @@ class ObservationsCfg:
         cube_pos = ObsTerm(func=mdp.object_pos_in_env_frame, params={"asset_cfg": SceneEntityCfg("cube")})
         cube_quat = ObsTerm(func=mdp.object_quat_w, params={"asset_cfg": SceneEntityCfg("cube")})
         goal_pos = ObsTerm(func=mdp.object_pos_in_env_frame, params={"asset_cfg": SceneEntityCfg("target_platform")})
+        # Object-relative error vectors + gripper state: give the policy the feedback
+        # signal directly instead of forcing it to infer relative position from
+        # absolute poses (NVIDIA-style obs design; the key lever for closed-loop BC).
+        eef_to_cube = ObsTerm(func=mdp.eef_to_cube, params={"robot_cfg": SceneEntityCfg("robot"), "cube_cfg": SceneEntityCfg("cube")})
+        cube_to_goal = ObsTerm(func=mdp.cube_to_goal, params={"cube_cfg": SceneEntityCfg("cube"), "goal_cfg": SceneEntityCfg("target_platform")})
+        gripper = ObsTerm(func=mdp.gripper_pos, params={"robot_cfg": SceneEntityCfg("robot")})
 
         def __post_init__(self) -> None:
             self.enable_corruption = False

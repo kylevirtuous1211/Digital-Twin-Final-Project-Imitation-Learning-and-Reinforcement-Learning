@@ -35,6 +35,9 @@ class ObservationsCfg:
         goal_pos = ObsTerm(func=mdp.object_pos_in_env_frame, params={"asset_cfg": SceneEntityCfg("target_platform")})
         goal_quat = ObsTerm(func=mdp.object_quat_w, params={"asset_cfg": SceneEntityCfg("target_platform")})
         gripper = ObsTerm(func=mdp.gripper_pos, params={"robot_cfg": SceneEntityCfg("robot")})
+        # Object-relative error vectors (same lever as L1): direct feedback signal.
+        eef_to_cube = ObsTerm(func=mdp.eef_to_cube, params={"robot_cfg": SceneEntityCfg("robot"), "cube_cfg": SceneEntityCfg("cube")})
+        cube_to_goal = ObsTerm(func=mdp.cube_to_goal, params={"cube_cfg": SceneEntityCfg("cube"), "goal_cfg": SceneEntityCfg("target_platform")})
 
         def __post_init__(self) -> None:
             self.enable_corruption = False

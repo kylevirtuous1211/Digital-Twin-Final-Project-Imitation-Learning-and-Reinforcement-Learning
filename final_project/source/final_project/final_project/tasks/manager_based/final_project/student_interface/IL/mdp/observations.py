@@ -74,3 +74,28 @@ def gripper_pos(env: ManagerBasedRLEnv, robot_cfg: SceneEntityCfg = SceneEntityC
     robot: Articulation = env.scene[robot_cfg.name]
     ids, _ = robot.find_joints(["panda_finger_.*"])
     return robot.data.joint_pos[:, ids]
+
+
+def eef_to_cube(
+    env: ManagerBasedRLEnv,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    cube_cfg: SceneEntityCfg = SceneEntityCfg("cube"),
+) -> torch.Tensor:
+    """Cube position RELATIVE to the end-effector (cube - eef), env frame. Shape [N, 3].
+
+    The direct approach-error vector — a closed-loop policy just moves along it. Both
+    terms are env-frame (env_origins subtracted), so this is consistent across envs.
+    """
+    return object_pos_in_env_frame(env, cube_cfg) - ee_pos(env, robot_cfg)
+
+
+def cube_to_goal(
+    env: ManagerBasedRLEnv,
+    cube_cfg: SceneEntityCfg = SceneEntityCfg("cube"),
+    goal_cfg: SceneEntityCfg = SceneEntityCfg("target_platform"),
+) -> torch.Tensor:
+    """Goal position RELATIVE to the cube (goal - cube), env frame. Shape [N, 3].
+
+    The direct place-error vector once the cube is grasped.
+    """
+    return object_pos_in_env_frame(env, goal_cfg) - object_pos_in_env_frame(env, cube_cfg)

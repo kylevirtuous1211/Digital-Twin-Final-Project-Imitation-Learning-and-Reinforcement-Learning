@@ -110,7 +110,9 @@
                     "cube_quat",
                     "goal_pos",
                     "goal_quat",
-                    "gripper"
+                    "gripper",
+                    "eef_to_cube",
+                    "cube_to_goal"
                 ],
                 "rgb": [],
                 "depth": [],
