@@ -65,7 +65,11 @@ class ILSceneCfg(InteractiveSceneCfg):
             collision_props=sim_utils.CollisionPropertiesCfg(),
             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.6, 0.2, 0.2)),
         ),
-        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.6, 0.3, 0.0)),
+        # (0.6, 0.3) put targets at 0.81-0.94 m from the base — beyond the Franka's
+        # ~0.85 m reach (mean 0.88 m), making ~77% of placements kinematically
+        # impossible. Moved to (0.45, 0.15) so absolute targets land at ~0.60-0.74 m
+        # (within reach, like the source platform at ~0.51-0.63 m).
+        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.45, 0.15, 0.0)),
     )
 
 
