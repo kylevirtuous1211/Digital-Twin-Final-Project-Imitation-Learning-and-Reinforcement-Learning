@@ -12,10 +12,15 @@ Large progress (0 → 44%/34%), but **not yet at the 80% pass threshold.** The r
 is validated and generalizes across levels; getting to 80% needs more iteration
 (see "Path to 80%").
 
-**Checkpoint sweep matters:** L1 epoch 500 = **44%** (clean, verified) > epoch 800 =
-38% — later epochs overfit, and `best_validation` picked epoch 138 = 0%. Always
-eval a few late checkpoints; don't trust `best_validation`. (Caveat: evals run
-back-to-back starve memory → false 0/low; verify each with a clean, memory-settled run.)
+**Checkpoint sweep matters, and the peak differs per level:**
+- L1: epoch 500 = **44%** > epoch 800 = 38% (later epochs overfit; `best_validation`
+  picked epoch 138 = 0%).
+- L3: epoch 800 = **34%** > epoch 500 = 22% (harder task — needs more training).
+
+So: don't trust `best_validation`; eval several late checkpoints per level. (Caveat:
+evals run back-to-back starve memory → false 0/low results that finish in ~50 s;
+verify each with a clean, memory-settled run — real evals pace over minutes and the
+success count climbs gradually.)
 
 ## The journey — what was actually wrong
 
